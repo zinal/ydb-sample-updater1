@@ -26,6 +26,7 @@ public class Updater1 implements Runnable {
     private final Connection con;
     private final BufferedReader input;
     private final int batchSize;
+    private long lastReportedAt = 0L;
     private long rows = 0L;
     private long transactions = 0L;
 
@@ -45,6 +46,7 @@ public class Updater1 implements Runnable {
 
     @Override
     public void run() {
+        lastReportedAt = System.currentTimeMillis();
         try {
             List<Long> batch = new ArrayList<>();
             String line;
@@ -57,9 +59,11 @@ public class Updater1 implements Runnable {
                 if (batch.size() >= batchSize) {
                     updateBatch(batch);
                     batch.clear();
+                    maybeReport(false);
                 }
             }
             updateBatch(batch);
+            maybeReport(true);
         } catch(Exception ex) {
             throw new RuntimeException("run() failed", ex);
         }
@@ -78,6 +82,21 @@ public class Updater1 implements Runnable {
         }
         con.commit();
         transactions += 1;
+    }
+
+    private boolean maybeReport(boolean term) {
+        boolean needReport = term;
+        if (!needReport) {
+            long tv = System.currentTimeMillis();
+            if (tv - lastReportedAt >= 10000L) {
+                needReport = true;
+                lastReportedAt = tv;
+            }
+        }
+        if (needReport) {
+            LOG.info("Progress: {} transactions, {} rows updated.", transactions, rows);
+        }
+        return needReport;
     }
 
     private static Properties readProperties(String fileName) {
