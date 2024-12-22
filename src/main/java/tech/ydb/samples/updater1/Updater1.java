@@ -55,7 +55,7 @@ public class Updater1 implements Runnable {
     public void run() {
         lastReportedAt = System.currentTimeMillis();
         try {
-            List<Long> batch = new ArrayList<>();
+            List<Long> batch = new ArrayList<>(batchSize);
             String line;
             while ((line = input.readLine()) != null) {
                 line = line.trim();
