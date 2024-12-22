@@ -14,6 +14,8 @@ import java.sql.PreparedStatement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.ThreadLocalRandom;
+import tech.ydb.jdbc.exception.YdbRetryableException;
 
 /**
  *
@@ -29,6 +31,7 @@ public class Updater1 implements Runnable {
     private long lastReportedAt = 0L;
     private long rows = 0L;
     private long transactions = 0L;
+    private long retries = 0L;
 
     public Updater1(Connection con, BufferedReader input, int batchSize) {
         this.con = con;
@@ -44,6 +47,10 @@ public class Updater1 implements Runnable {
         return transactions;
     }
 
+    public long getRetries() {
+        return retries;
+    }
+
     @Override
     public void run() {
         lastReportedAt = System.currentTimeMillis();
@@ -57,31 +64,50 @@ public class Updater1 implements Runnable {
                 }
                 batch.add(Long.valueOf(line));
                 if (batch.size() >= batchSize) {
-                    updateBatch(batch);
+                    updateBatchWithRetries(batch);
                     batch.clear();
                     maybeReport(false);
                 }
             }
-            updateBatch(batch);
+            updateBatchWithRetries(batch);
             maybeReport(true);
         } catch(Exception ex) {
             throw new RuntimeException("run() failed", ex);
         }
     }
 
+    private void updateBatchWithRetries(List<Long> batch) throws Exception {
+        while (true) {
+            try {
+                updateBatch(batch);
+                return;
+            } catch(YdbRetryableException yre) {
+                retries += 1;
+            }
+            try {
+                // Примитивная пауза при повторе.
+                // На практике используются специальные библиотеки управления повторами.
+                Thread.sleep(ThreadLocalRandom.current().nextLong(50L, 500L));
+            } catch(InterruptedException ix) {}
+        }
+    }
+
     private void updateBatch(List<Long> batch) throws Exception {
+        if (batch.isEmpty()) {
+            return;
+        }
         String sql = "UPDATE `sm1/EVENTS` SET REMARKS=? WHERE CODE=?";
         try (PreparedStatement ps = con.prepareStatement(sql)) {
             for (Long code : batch) {
                 ps.setString(1, "updated #" + code);
                 ps.setLong(2, code);
                 ps.addBatch();
-                rows += 1;
             }
             ps.executeBatch();
         }
         con.commit();
         transactions += 1;
+        rows += batch.size();
     }
 
     private boolean maybeReport(boolean term) {
@@ -94,7 +120,8 @@ public class Updater1 implements Runnable {
             }
         }
         if (needReport) {
-            LOG.info("Progress: {} transactions, {} rows updated.", transactions, rows);
+            LOG.info("Progress: {} transactions with {} retries, {} rows updated.",
+                    transactions, retries, rows);
         }
         return needReport;
     }
@@ -138,7 +165,7 @@ public class Updater1 implements Runnable {
             }
             LOG.info("Reading configuration from {}...", configFileName);
             Properties props = readProperties(configFileName);
-            long tvStart, tvFinish, transactions;
+            long tvStart, tvFinish, transactions, retries;
             LOG.info("Opening the id file {}...", idFileName);
             try (FileInputStream fis = new FileInputStream(idFileName)) {
                 LOG.info("Obtaining the JDBC connection...");
@@ -152,12 +179,13 @@ public class Updater1 implements Runnable {
                     LOG.info("Entering the updater algorithm...");
                     tvStart = System.currentTimeMillis();
                     worker.run();
-                    transactions = worker.getTransactions();
                     tvFinish = System.currentTimeMillis();
+                    transactions = worker.getTransactions();
+                    retries = worker.getRetries();
                 }
             }
-            LOG.info("All done in {} milliseconds, total {} transactions.", 
-                    tvFinish - tvStart, transactions);
+            LOG.info("All done in {} milliseconds, total {} transactions with {} retries.",
+                    tvFinish - tvStart, transactions, retries);
         } catch(Exception ex) {
             LOG.error("FATAL", ex);
         }
